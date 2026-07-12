@@ -1,4 +1,5 @@
 import { classifyRound, normalize, type LeagueProfile } from "./league-profiles";
+import type { NormalizedOddsInput } from "./match-analysis";
 import type { StoredFixture } from "./storage";
 
 const API_BASE = "https://v3.football.api-sports.io";
@@ -138,4 +139,130 @@ export async function fetchFixtureById(apiKey: string, profile: LeagueProfile, s
   const envelope = await apiGet<ProviderFixture[]>(apiKey, "fixtures", { id: fixtureId, timezone: "UTC" });
   if (!Array.isArray(envelope.response) || envelope.response.length !== 1) throw new ApiFootballError("实时赛程查询未返回唯一比赛", "FIXTURE_NOT_UNIQUE");
   return parseFixture(envelope.response[0], profile, resolved, new Date().toISOString());
+}
+
+export type ProviderOddsItem = {
+  fixture?: { id?: number };
+  update?: string;
+  bookmakers?: Array<{
+    id?: number;
+    name?: string;
+    bets?: Array<{
+      name?: string;
+      values?: Array<{ value?: string; odd?: string | number }>;
+    }>;
+  }>;
+};
+
+function decimalOdd(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 1 ? parsed : null;
+}
+
+function median(values: readonly number[]): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function marketName(value: string | undefined): string {
+  return value?.normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g, " ") ?? "";
+}
+
+function selectionName(value: string | undefined): string {
+  return marketName(value).replace(/\s+/g, " ");
+}
+
+function validIso(value: unknown): string | null {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return null;
+  return new Date(value).toISOString();
+}
+
+/**
+ * Build a non-actionable market consensus from cross-bookmaker medians.
+ * The result is deliberately labelled as reference-only: its selections may
+ * not coexist at a single bookmaker and therefore are never treated as an
+ * executable price.
+ */
+export function normalizeProviderOdds(
+  response: readonly ProviderOddsItem[],
+  fixtureId: number,
+  retrievedAtUtc = new Date().toISOString(),
+): NormalizedOddsInput {
+  const prices = new Map<string, number[]>();
+  const bookmakers = new Map<number | string, string>();
+  const providerUpdates: string[] = [];
+  const add = (key: string, value: unknown) => {
+    const parsed = decimalOdd(value);
+    if (parsed === null) return;
+    const rows = prices.get(key) ?? [];
+    rows.push(parsed);
+    prices.set(key, rows);
+  };
+  for (const item of response) {
+    if (item.fixture?.id !== fixtureId) continue;
+    const update = validIso(item.update);
+    if (update) providerUpdates.push(update);
+    for (const bookmaker of item.bookmakers ?? []) {
+      const bookmakerName = bookmaker.name?.normalize("NFKC").trim();
+      if (!bookmakerName || !Number.isSafeInteger(bookmaker.id) || (bookmaker.id as number) <= 0) continue;
+      bookmakers.set(bookmaker.id as number, bookmakerName);
+      for (const bet of bookmaker.bets ?? []) {
+        const name = marketName(bet.name);
+        const isOneXTwo = ["match winner", "1x2", "fulltime result"].includes(name);
+        const isTotals = ["goals over/under", "over/under", "total goals"].includes(name);
+        const isBtts = ["both teams score", "both teams to score"].includes(name);
+        if (!isOneXTwo && !isTotals && !isBtts) continue;
+        for (const value of bet.values ?? []) {
+          const selection = selectionName(value.value);
+          if (isOneXTwo && selection === "home") add("home", value.odd);
+          else if (isOneXTwo && selection === "draw") add("draw", value.odd);
+          else if (isOneXTwo && selection === "away") add("away", value.odd);
+          else if (isTotals && /^over 2[.,]5$/.test(selection)) add("over25", value.odd);
+          else if (isTotals && /^under 2[.,]5$/.test(selection)) add("under25", value.odd);
+          else if (isBtts && selection === "yes") add("bttsYes", value.odd);
+          else if (isBtts && selection === "no") add("bttsNo", value.odd);
+        }
+      }
+    }
+  }
+  const home = median(prices.get("home") ?? []);
+  const draw = median(prices.get("draw") ?? []);
+  const away = median(prices.get("away") ?? []);
+  const over = median(prices.get("over25") ?? []);
+  const under = median(prices.get("under25") ?? []);
+  const yes = median(prices.get("bttsYes") ?? []);
+  const no = median(prices.get("bttsNo") ?? []);
+  const oneXTwo = home && draw && away ? { home, draw, away } : undefined;
+  const overUnder25 = over && under ? { over, under } : undefined;
+  const btts = yes && no ? { yes, no } : undefined;
+  const completeMarketCount = [oneXTwo, overUnder25, btts].filter(Boolean).length;
+  const bookmakerNames = [...bookmakers.values()].sort((left, right) => left.localeCompare(right, "zh-CN"));
+  return {
+    ...(oneXTwo ? { oneXTwo } : {}),
+    ...(overUnder25 ? { overUnder25 } : {}),
+    ...(btts ? { btts } : {}),
+    provenance: {
+      source: "API_FOOTBALL",
+      status: completeMarketCount === 0 ? "NO_MARKET" : completeMarketCount === 3 ? "OK" : "PARTIAL",
+      retrievedAtUtc: validIso(retrievedAtUtc) ?? new Date().toISOString(),
+      providerUpdatedAtUtc: providerUpdates.sort().at(-1) ?? null,
+      bookmakerCount: bookmakerNames.length,
+      bookmakerNames,
+      pricingMethod: "CROSS_BOOKMAKER_MEDIAN",
+      actionable: false,
+      detail: completeMarketCount === 0
+        ? "API-Football 未返回完整的胜平负、大小2.5或双方进球市场"
+        : completeMarketCount < 3 ? `仅取得 ${completeMarketCount}/3 个完整参考市场` : "取得三个完整的跨公司中位参考市场",
+    },
+  };
+}
+
+export async function fetchFixtureOdds(apiKey: string, fixtureId: number): Promise<NormalizedOddsInput> {
+  const envelope = await apiGet<ProviderOddsItem[]>(apiKey, "odds", { fixture: fixtureId });
+  const retrievedAtUtc = new Date().toISOString();
+  return Array.isArray(envelope.response)
+    ? normalizeProviderOdds(envelope.response, fixtureId, retrievedAtUtc)
+    : normalizeProviderOdds([], fixtureId, retrievedAtUtc);
 }

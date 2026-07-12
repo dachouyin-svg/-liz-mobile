@@ -1,4 +1,4 @@
-const CACHE = "liz-mobile-6.1.0a4";
+const CACHE = "liz-mobile-6.1.0-rc.2";
 const BASE = new URL(self.registration.scope).pathname;
 
 self.addEventListener("install", (event) => {

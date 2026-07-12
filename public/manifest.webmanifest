@@ -1,7 +1,7 @@
 {
-  "name": "Liz Mobile 6.1",
-  "short_name": "Liz Mobile",
-  "description": "18 项足球赛事的设备端预测工作台",
+  "name": "Liz 6.1 手机版",
+  "short_name": "Liz 手机版",
+  "description": "18 项足球赛事的设备端中文分析、球队详情与正式版验证工作台",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

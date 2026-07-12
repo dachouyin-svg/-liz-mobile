@@ -1,4 +1,4 @@
-export type ValidationState = "ALPHA" | "SHADOW";
+export type ValidationState = "SHADOW" | "ALPHA" | "RC" | "STABLE";
 export type SeasonBasis = "EUROPEAN_START_YEAR" | "CALENDAR_YEAR" | "EDITION_YEAR";
 export type RoundDisposition = "IN_SCOPE" | "EXCLUDED" | "QUARANTINE";
 
