@@ -1,0 +1,14 @@
+{
+  "name": "Liz Mobile 6.1",
+  "short_name": "Liz Mobile",
+  "description": "18 项足球赛事的设备端预测工作台",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#07110e",
+  "theme_color": "#07110e",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
